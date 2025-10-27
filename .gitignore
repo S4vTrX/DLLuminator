@@ -1,0 +1,5 @@
+# Ignore everything in x64 directories
+x64/
+
+# Or be more specific:
+x64/**/*
