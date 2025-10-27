@@ -1,10 +1,3 @@
-// dlluminator_simple.cpp
-// C++17: scan a single DLL/PE or a directory for PE files and report the specified section's Virtual Size in KB.
-// Usage:
-//   ./dlluminator_simple --dll <path> [--section <name>] [--min-size-kb N] [--csv <file>]
-//   OR
-//   ./dlluminator_simple --directory <dir> [--section <name>] [--min-size-kb N] [--csv <file>]
-
 #include <iostream>
 #include <fstream>
 #include <iomanip>
