@@ -1,11 +1,19 @@
+// dlluminator_simple.cpp
+// C++17: scan a single DLL/PE or a directory for PE files and report the specified section's Virtual Size in KB.
+// Usage:
+//   ./dlluminator_simple --dll <path> [--section <name>] [--min-size-kb N] [--csv <file>]
+//   OR
+//   ./dlluminator_simple --directory <dir> [--section <name>] [--min-size-kb N] [--csv <file>]
+
 #include <iostream>
 #include <fstream>
 #include <iomanip>
-#include <cstring>
-#include <cstdint>
-#include <filesystem>
 #include <vector>
+#include <string>
 #include <algorithm>
+#include <filesystem>
+#include <cstdint>
+#include <cstring>
 
 namespace fs = std::filesystem;
 
@@ -42,51 +50,6 @@ struct IMAGE_FILE_HEADER {
     uint16_t Characteristics;
 };
 
-struct IMAGE_DATA_DIRECTORY {
-    uint32_t VirtualAddress;
-    uint32_t Size;
-};
-
-struct IMAGE_OPTIONAL_HEADER32 {
-    uint16_t Magic;
-    uint8_t  MajorLinkerVersion;
-    uint8_t  MinorLinkerVersion;
-    uint32_t SizeOfCode;
-    uint32_t SizeOfInitializedData;
-    uint32_t SizeOfUninitializedData;
-    uint32_t AddressOfEntryPoint;
-    uint32_t BaseOfCode;
-    uint32_t BaseOfData;
-    uint32_t ImageBase;
-    uint32_t SectionAlignment;
-    uint32_t FileAlignment;
-    uint16_t MajorOperatingSystemVersion;
-    uint16_t MinorOperatingSystemVersion;
-    uint16_t MajorImageVersion;
-    uint16_t MinorImageVersion;
-    uint16_t MajorSubsystemVersion;
-    uint16_t MinorSubsystemVersion;
-    uint32_t Win32VersionValue;
-    uint32_t SizeOfImage;
-    uint32_t SizeOfHeaders;
-    uint32_t CheckSum;
-    uint16_t Subsystem;
-    uint16_t DllCharacteristics;
-    uint32_t SizeOfStackReserve;
-    uint32_t SizeOfStackCommit;
-    uint32_t SizeOfHeapReserve;
-    uint32_t SizeOfHeapCommit;
-    uint32_t LoaderFlags;
-    uint32_t NumberOfRvaAndSizes;
-    IMAGE_DATA_DIRECTORY DataDirectory[16];
-};
-
-struct IMAGE_NT_HEADERS32 {
-    uint32_t Signature;
-    IMAGE_FILE_HEADER FileHeader;
-    IMAGE_OPTIONAL_HEADER32 OptionalHeader;
-};
-
 struct IMAGE_SECTION_HEADER {
     char     Name[8];
     union {
@@ -104,82 +67,181 @@ struct IMAGE_SECTION_HEADER {
 };
 #pragma pack(pop)
 
-double get_text_section_size_kb(const std::string& filepath) {
+struct Entry {
+    std::string path;
+    std::string filename;
+    double virtual_kb;
+};
+
+// parse section virtual size (PE32/PE32+ compatible since section headers are same). returns true on success and fills virtualSize
+bool parse_section_virtual_size(const std::string& filepath, const std::string& section_name, uint32_t& virtualSize) {
     std::ifstream f(filepath, std::ios::binary);
-    if (!f) return -1.0;
+    if (!f) return false;
 
-    IMAGE_DOS_HEADER dosHdr;
-    f.read(reinterpret_cast<char*>(&dosHdr), sizeof(dosHdr));
-    if (dosHdr.e_magic != 0x5A4D) return -1.0;
+    IMAGE_DOS_HEADER dos;
+    f.read(reinterpret_cast<char*>(&dos), sizeof(dos));
+    if (!f || dos.e_magic != 0x5A4D) return false; // not a DOS MZ
 
-    f.seekg(dosHdr.e_lfanew, std::ios::beg);
-    IMAGE_NT_HEADERS32 ntHdr;
-    f.read(reinterpret_cast<char*>(&ntHdr), sizeof(ntHdr));
-    if (ntHdr.Signature != 0x00004550) return -1.0;
+    // Move to NT headers
+    f.seekg(dos.e_lfanew, std::ios::beg);
+    uint32_t pe_sig = 0;
+    IMAGE_FILE_HEADER fileHeader;
+    f.read(reinterpret_cast<char*>(&pe_sig), sizeof(pe_sig));
+    f.read(reinterpret_cast<char*>(&fileHeader), sizeof(fileHeader));
+    if (!f || pe_sig != 0x00004550) return false; // not a PE
 
-    uint16_t numSections = ntHdr.FileHeader.NumberOfSections;
-    size_t sectionHeadersStart = dosHdr.e_lfanew + sizeof(uint32_t) + sizeof(IMAGE_FILE_HEADER)
-        + ntHdr.FileHeader.SizeOfOptionalHeader;
+    // Seek to section headers (skip optional header)
+    std::streamoff sectionHeadersStart = (std::streamoff)dos.e_lfanew + sizeof(uint32_t) + sizeof(IMAGE_FILE_HEADER) + fileHeader.SizeOfOptionalHeader;
     f.seekg(sectionHeadersStart, std::ios::beg);
+    if (!f) return false;
 
-    for (uint16_t i = 0; i < numSections; i++) {
-        IMAGE_SECTION_HEADER secHdr;
-        f.read(reinterpret_cast<char*>(&secHdr), sizeof(secHdr));
-        char name[9] = { 0 };
-        memcpy(name, secHdr.Name, 8);
-
-        if (strcmp(name, ".text") == 0) {
-            return secHdr.Misc.VirtualSize / 1024.0; // KB
+    uint16_t nSections = fileHeader.NumberOfSections;
+    for (uint16_t i = 0; i < nSections; ++i) {
+        IMAGE_SECTION_HEADER sh;
+        f.read(reinterpret_cast<char*>(&sh), sizeof(sh));
+        if (!f) return false;
+        char namebuf[9] = { 0 };
+        std::memcpy(namebuf, sh.Name, 8);
+        if (section_name == std::string(namebuf)) {
+            virtualSize = sh.Misc.VirtualSize;
+            return true;
         }
     }
-    return -1.0;
+    return false;
 }
 
-int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <directory_path>\n";
+static std::string to_lower(std::string s) {
+    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+void print_usage(const char* prog) {
+    std::cerr << "Usage:\n"
+        << "  " << prog << " --dll <path> [--section <name>] [--min-size-kb N] [--csv <file>]\n"
+        << "  " << prog << " --directory <dir> [--section <name>] [--min-size-kb N] [--csv <file>]\n\n"
+        << "Defaults: section = .text, min-size-kb = 0\n";
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        print_usage(argv[0]);
         return 1;
     }
 
-    fs::path dirPath(argv[1]);
-    if (!fs::exists(dirPath) || !fs::is_directory(dirPath)) {
-        std::cerr << "Invalid directory path: " << dirPath << "\n";
+    std::string mode_dll, mode_dir;
+    std::string section = ".text";
+    double min_size_kb = 0.0;
+    std::string csv_out;
+
+    // simple arg parsing
+    for (int i = 1; i < argc; ++i) {
+        std::string a = argv[i];
+        if (a == "--dll") {
+            if (i + 1 >= argc) { print_usage(argv[0]); return 1; }
+            mode_dll = argv[++i];
+        }
+        else if (a == "--directory") {
+            if (i + 1 >= argc) { print_usage(argv[0]); return 1; }
+            mode_dir = argv[++i];
+        }
+        else if (a == "--section") {
+            if (i + 1 >= argc) { print_usage(argv[0]); return 1; }
+            section = argv[++i];
+        }
+        else if (a == "--min-size-kb") {
+            if (i + 1 >= argc) { print_usage(argv[0]); return 1; }
+            try { min_size_kb = std::stod(argv[++i]); }
+            catch (...) { min_size_kb = 0.0; }
+        }
+        else if (a == "--csv") {
+            if (i + 1 >= argc) { print_usage(argv[0]); return 1; }
+            csv_out = argv[++i];
+        }
+        else {
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
+    if (mode_dll.empty() == mode_dir.empty()) {
+        std::cerr << "Provide exactly one of --dll or --directory.\n";
+        print_usage(argv[0]);
         return 1;
     }
 
-    struct Entry {
-        std::string name;
-        double sizeKB;
-    };
     std::vector<Entry> results;
 
-    for (const auto& entry : fs::directory_iterator(dirPath)) {
-        if (!entry.is_regular_file()) continue;
-        auto ext = entry.path().extension().string();
-        if (ext == ".dll") {
-            double sizeKB = get_text_section_size_kb(entry.path().string());
-            if (sizeKB > 0) {
-                results.push_back({ entry.path().filename().string(), sizeKB });
+    // helper to process a single file
+    auto process_file = [&](const fs::path& p) {
+        if (!fs::is_regular_file(p)) return;
+        // quick extension filter for common PE types
+        std::string ext = to_lower(p.extension().string());
+        if (!ext.empty()) {
+            if (ext != ".dll" && ext != ".exe" && ext != ".sys") {
+                // skip non-PE in directory mode
+                return;
+            }
+        }
+        uint32_t vsize = 0;
+        if (!parse_section_virtual_size(p.string(), section, vsize)) return;
+        double vkb = vsize / 1024.0;
+        if (vkb < min_size_kb) return;
+        results.push_back({ p.string(), p.filename().string(), vkb });
+        };
+
+    try {
+        if (!mode_dll.empty()) {
+            fs::path p(mode_dll);
+            process_file(p);
+        }
+        else {
+            fs::path dir(mode_dir);
+            if (!fs::exists(dir) || !fs::is_directory(dir)) {
+                std::cerr << "Invalid directory: " << dir << "\n";
+                return 1;
+            }
+            for (const auto& entry : fs::directory_iterator(dir)) {
+                process_file(entry.path());
             }
         }
     }
-
-    // Sort by size (descending)
-    std::sort(results.begin(), results.end(), [](const Entry& a, const Entry& b) {
-        return a.sizeKB > b.sizeKB;
-        });
-
-    std::cout << std::fixed << std::setprecision(2);
-    std::cout << "\nScanning directory: " << dirPath << "\n";
-    std::cout << std::left << std::setw(50) << "File" << " | " << "Text Section Size (KB)\n";
-    std::cout << std::string(75, '-') << "\n";
-
-    for (const auto& e : results) {
-        std::cout << std::left << std::setw(50) << e.name << " | " << e.sizeKB << " KB\n";
+    catch (const std::exception& e) {
+        std::cerr << "Error during iteration: " << e.what() << "\n";
+        return 1;
     }
 
-    if (results.empty())
-        std::cout << "No valid PE files found.\n";
+    // sort by size descending (single source of truth)
+    std::sort(results.begin(), results.end(), [](const Entry& a, const Entry& b) {
+        return a.virtual_kb > b.virtual_kb;
+        });
+
+    // print results (table)
+    std::cout << std::fixed << std::setprecision(2);
+    std::cout << "Section: " << section << "\n";
+    if (!mode_dll.empty()) std::cout << "Scanned file: " << mode_dll << "\n";
+    else std::cout << "Scanned directory: " << mode_dir << "\n";
+    std::cout << "\n" << std::left << std::setw(60) << "File" << " | " << "Text Section Size (KB)\n";
+    std::cout << std::string(85, '-') << "\n";
+    for (const auto& e : results) {
+        std::cout << std::left << std::setw(60) << e.filename << " | " << e.virtual_kb << " KB\n";
+    }
+    if (results.empty()) std::cout << "No files matched the criteria.\n";
+
+  
+
+    // Write CSV if requested (same sorted order)
+    if (!csv_out.empty()) {
+        std::ofstream csv(csv_out);
+        if (!csv) {
+            std::cerr << "Failed to open CSV file: " << csv_out << "\n";
+            return 1;
+        }
+        csv << "file,virtual_kb\n";
+        for (const auto& e : results) {
+            csv << std::quoted(e.path) << ',' << e.virtual_kb << '\n';
+        }
+        std::cout << "\nCSV exported to: " << csv_out << "\n";
+    }
 
     return 0;
 }
