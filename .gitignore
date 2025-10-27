@@ -1,5 +1,10 @@
-# Ignore everything in x64 directories
+gitignore
+# Common build directories for different platforms
 x64/
-
-# Or be more specific:
-x64/**/*
+x86/
+Win32/
+Debug/
+Release/
+*.sln
+*.vcxproj*
+*.filters

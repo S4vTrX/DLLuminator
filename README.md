@@ -46,5 +46,5 @@ dlluminator_simple --directory <dir> [--section <name>] [--min-size-kb N] [--csv
 
 🧩 Credits
 
-PE parsing logic inspired by [0xRick's Pe Parser Blog](https://0xrick.github.io/win-internals/pe8)
-Concept inspired by research on Module Stomping, DLL hollowing, and reflective code injection.
+- PE parsing logic inspired by [0xRick's Pe Parser Blog](https://0xrick.github.io/win-internals/pe8)
+- Concept inspired by research on Module Stomping, DLL hollowing, and reflective code injection.
